@@ -67,8 +67,7 @@ Regole:
             raw_response = result.get("response", "").strip()
             
             # Pulisce eventuali caratteri di formattazione Markdown (se il modello li aggiunge)
-            raw_response = raw_response.replace("```json", "").replace("
-```", "").strip()
+            raw_response = raw_response.replace("```json", "").replace("```", "").strip()
             
             return jsonify({"success": True, "raw_text": raw_response})
         else:
