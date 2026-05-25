@@ -1,21 +1,16 @@
 import os
+import requests
 import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from huggingface_hub import InferenceClient
 
 app = Flask(__name__)
 CORS(app)
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-client = InferenceClient(token=HF_TOKEN)
-
-# Modelli stabili e totalmente OPEN (No Gated / No 404)
-MODELS = [
-    "Qwen/Qwen2.5-7B-Instruct",
-    "Qwen/Qwen2.5-Coder-7B-Instruct",
-    "microsoft/Phi-3-mini-4k-instruct"
-]
+# Configurazione API Ollama (Maya)
+API_URL = "https://maya.mynuapp.it/api/generate"
+API_KEY = "47461740de09e3e8644aa6b4a3d4982393910f1f4fc2ca2fc6118b71eae25a6e"
+MODEL_NAME = "qwen2.5:1.5b"
 
 @app.route('/dashboard-update', methods=['POST'])
 def dashboard_update():
@@ -28,7 +23,7 @@ def dashboard_update():
         if not user_message:
             return jsonify({"success": False, "reply": "Messaggio vuoto."}), 400
 
-        # Il System Prompt blindato per i dati del tuo database
+        # System Prompt come definito da te
         system_prompt = f"""Sei l'assistente AI del gestionale di {nome_attivita}. L'utente loggato può modificare solo i SUOI prodotti, categorie e menu (utente_id = {user_id}).
 
 Rispondi SEMPRE e SOLO con un oggetto JSON valido. Zero testo fuori dalle graffe.
@@ -40,49 +35,44 @@ Azioni disponibili:
 - search_product: cerca prodotto per nome e mostra lista
 - unknown: non hai capito
 
-Campi modificabili nel DB (usa esattamente questi nomi nei "fields"):
+Campi modificabili nel DB:
 - prodotti: titolo, ingredienti, prezzo, prezzo_scontato, visibile, prodotto_fresco, prodotto_congelato, senza_glutine, senza_lattosio, note, disponibile_senzaGlutine, disponibile_senzaLattosio, prezzo_senzaGlutine, prezzo_senzaLattosio, categoria_id
 - categorie: titolo, descrizione, visibile, colore, ordinamento
 - menu: titolo, prezzo_fisso, visibile
 
-Regole speciali per i campi:
-- Per i menu e le categorie si usa sempre il campo "titolo" e MAI "nome".
-- I campi "visibile" (presenti in prodotti, categorie e menu) accettano SOLO 1 (attivo) o 0 (disattivo).
+Regole:
+- Per menu e categorie usa "titolo" e MAI "nome".
+- "visibile" accetta SOLO 1 o 0."""
 
-Esempi:
-Utente: "Cambia prezzo della pizza margherita a 8 euro"
-{{"action":"update_product","search_name":"pizza margherita","fields":{{"prezzo":8.00}}}}
+        # Costruzione del prompt per il modello
+        # Concateniamo System e User per il formato 'generate' di Ollama
+        full_prompt = f"{system_prompt}\n\nUtente: {user_message}\n\nRispondi in formato JSON:"
 
-Utente: "Rinomina categoria Primi in Primi Piatti"
-{{"action":"update_category","search_name":"Primi","fields":{{"titolo":"Primi Piatti"}}}}
+        payload = {
+            "model": MODEL_NAME,
+            "prompt": full_prompt,
+            "stream": False # Necessario per ricevere la risposta completa in un blocco solo
+        }
 
-Utente: "Nascondi la categoria Dolci dal menu pubblico"
-{{"action":"update_category","search_name":"Dolci","fields":{{"visibile":0}}}}"""
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": API_KEY
+        }
 
-        raw_response = None
+        # Chiamata all'API
+        response = requests.post(API_URL, json=payload, headers=headers, timeout=30)
         
-        # Ciclo di fallback sui modelli (proprio come l'altro chatbot)
-        for model_id in MODELS:
-            try:
-                response = client.chat_completion(
-                    model=model_id,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message}
-                    ],
-                    max_tokens=300,
-                    temperature=0.05
-                )
-                raw_response = response.choices[0].message.content
-                if raw_response:
-                    break # Modello funzionante trovato, esce dal ciclo
-            except:
-                continue # Se fallisce, passa al modello successivo
-
-        if not raw_response:
-            return jsonify({"success": False, "reply": "Ops, tutti i moduli AI sono momentaneamente offline. Riprova tra poco! 🍕"})
-
-        return jsonify({"success": True, "raw_text": raw_response})
+        if response.status_code == 200:
+            result = response.json()
+            raw_response = result.get("response", "").strip()
+            
+            # Pulisce eventuali caratteri di formattazione Markdown (se il modello li aggiunge)
+            raw_response = raw_response.replace("```json", "").replace("
+```", "").strip()
+            
+            return jsonify({"success": True, "raw_text": raw_response})
+        else:
+            return jsonify({"success": False, "reply": "Errore di connessione al motore AI.", "details": response.text}), 500
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
