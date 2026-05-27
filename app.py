@@ -1,19 +1,63 @@
 import os
 import requests
-import json
+import threading
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from huggingface_hub import InferenceClient
 
 app = Flask(__name__)
 CORS(app)
 
-# Configurazione API Ollama (Maya)
-API_URL = "https://maya.mynuapp.it/api/generate"
-API_KEY = "47461740de09e3e8644aa6b4a3d4982393910f1f4fc2ca2fc6118b71eae25a6e"
-MODEL_NAME = "qwen2.5:1.5b"
+# --- CONFIGURAZIONE ---
+# Ollama (Maya)
+OLLAMA_API_URL = "https://maya.mynuapp.it/api/generate"
+OLLAMA_API_KEY = "47461740de09e3e8644aa6b4a3d4982393910f1f4fc2ca2fc6118b71eae25a6e"
+OLLAMA_MODEL = "qwen2.5:1.5b"
+
+# HuggingFace (Fallback)
+HF_TOKEN = os.getenv("HF_TOKEN")
+hf_client = InferenceClient(token=HF_TOKEN)
+HF_MODELS = [
+    "Qwen/Qwen2.5-7B-Instruct",
+    "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "microsoft/Phi-3-mini-4k-instruct"
+]
+
+ollama_busy = False
+ollama_lock = threading.Lock()
+
+def clean_json_response(text):
+    return text.replace("```json", "").replace("```", "").strip()
+
+def query_ollama(prompt, system_prompt):
+    full_prompt = f"{system_prompt}\n\nUtente: {prompt}\n\nRispondi in formato JSON:"
+    payload = {"model": OLLAMA_MODEL, "prompt": full_prompt, "stream": False}
+    headers = {"Content-Type": "application/json", "X-API-Key": OLLAMA_API_KEY}
+    try:
+        response = requests.post(OLLAMA_API_URL, json=payload, headers=headers, timeout=25)
+        if response.status_code == 200:
+            return response.json().get("response", "")
+    except Exception:
+        return None
+    return None
+
+def query_huggingface(prompt, system_prompt):
+    for model_id in HF_MODELS:
+        try:
+            response = hf_client.chat_completion(
+                model=model_id,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+                max_tokens=300,
+                temperature=0.05
+            )
+            return response.choices[0].message.content
+        except Exception:
+            continue
+    return None
 
 @app.route('/dashboard-update', methods=['POST'])
 def dashboard_update():
+    global ollama_busy
     try:
         data = request.get_json(force=True)
         user_message = data.get("message", "")
@@ -23,7 +67,7 @@ def dashboard_update():
         if not user_message:
             return jsonify({"success": False, "reply": "Messaggio vuoto."}), 400
 
-        # System Prompt come definito da te
+        # PROMPT ORIGINALE RIPRISTINATO
         system_prompt = f"""Sei l'assistente AI del gestionale di {nome_attivita}. L'utente loggato può modificare solo i SUOI prodotti, categorie e menu (utente_id = {user_id}).
 
 Rispondi SEMPRE e SOLO con un oggetto JSON valido. Zero testo fuori dalle graffe.
@@ -44,34 +88,29 @@ Regole:
 - Per menu e categorie usa "titolo" e MAI "nome".
 - "visibile" accetta SOLO 1 o 0."""
 
-        # Costruzione del prompt per il modello
-        # Concateniamo System e User per il formato 'generate' di Ollama
-        full_prompt = f"{system_prompt}\n\nUtente: {user_message}\n\nRispondi in formato JSON:"
+        # 1. Tenta Ollama
+        used_ollama = False
+        with ollama_lock:
+            if not ollama_busy:
+                ollama_busy = True
+                used_ollama = True
 
-        payload = {
-            "model": MODEL_NAME,
-            "prompt": full_prompt,
-            "stream": False # Necessario per ricevere la risposta completa in un blocco solo
-        }
+        if used_ollama:
+            res = query_ollama(user_message, system_prompt)
+            with ollama_lock:
+                ollama_busy = False
+            if res:
+                return jsonify({"success": True, "raw_text": clean_json_response(res)})
+            else:
+                with ollama_lock:
+                    ollama_busy = False
 
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Key": API_KEY
-        }
+        # 2. Fallback su HF
+        res = query_huggingface(user_message, system_prompt)
+        if res:
+            return jsonify({"success": True, "raw_text": clean_json_response(res)})
 
-        # Chiamata all'API
-        response = requests.post(API_URL, json=payload, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            result = response.json()
-            raw_response = result.get("response", "").strip()
-            
-            # Pulisce eventuali caratteri di formattazione Markdown (se il modello li aggiunge)
-            raw_response = raw_response.replace("```json", "").replace("```", "").strip()
-            
-            return jsonify({"success": True, "raw_text": raw_response})
-        else:
-            return jsonify({"success": False, "reply": "Errore di connessione al motore AI.", "details": response.text}), 500
+        return jsonify({"success": False, "reply": "Sistemi AI non disponibili."}), 503
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
