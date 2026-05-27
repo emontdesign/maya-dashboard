@@ -23,13 +23,16 @@ HF_MODELS = [
     "microsoft/Phi-3-mini-4k-instruct"
 ]
 
+# Semaforo per gestire il carico di Ollama
 ollama_busy = False
 ollama_lock = threading.Lock()
 
 def clean_json_response(text):
+    """Pulisce la risposta da eventuali tag Markdown."""
     return text.replace("```json", "").replace("```", "").strip()
 
 def query_ollama(prompt, system_prompt):
+    # Passiamo il system prompt e il prompt utente al modello
     full_prompt = f"{system_prompt}\n\nUtente: {prompt}\n\nRispondi in formato JSON:"
     payload = {"model": OLLAMA_MODEL, "prompt": full_prompt, "stream": False}
     headers = {"Content-Type": "application/json", "X-API-Key": OLLAMA_API_KEY}
@@ -42,6 +45,7 @@ def query_ollama(prompt, system_prompt):
     return None
 
 def query_huggingface(prompt, system_prompt):
+    # Cicla attraverso i modelli HF in caso di errore
     for model_id in HF_MODELS:
         try:
             response = hf_client.chat_completion(
@@ -52,7 +56,7 @@ def query_huggingface(prompt, system_prompt):
             )
             return response.choices[0].message.content
         except Exception:
-            continue
+            continue 
     return None
 
 @app.route('/dashboard-update', methods=['POST'])
@@ -67,17 +71,21 @@ def dashboard_update():
         if not user_message:
             return jsonify({"success": False, "reply": "Messaggio vuoto."}), 400
 
-        # PROMPT ORIGINALE RIPRISTINATO
+        # System Prompt con Esempi correttivi per l'estrazione dati
         system_prompt = f"""Sei l'assistente AI del gestionale di {nome_attivita}. L'utente loggato può modificare solo i SUOI prodotti, categorie e menu (utente_id = {user_id}).
 
 Rispondi SEMPRE e SOLO con un oggetto JSON valido. Zero testo fuori dalle graffe.
 
 Azioni disponibili:
-- update_product: modifica un prodotto (usa "search_name" se l'ID non è noto)
+- update_product: modifica un prodotto (usa "search_name" per identificare il prodotto tramite il suo nome se l'ID non è noto)
 - update_category: modifica una categoria
 - update_menu: modifica un menu
 - search_product: cerca prodotto per nome e mostra lista
 - unknown: non hai capito
+
+Esempi di estrazione (IMPORTANTE):
+Utente: "Modifica il prezzo di Pasta al Pomodoro a 5"
+Risposta: {{"action":"update_product","search_name":"Pasta al Pomodoro","fields":{{"prezzo":5}}}}
 
 Campi modificabili nel DB:
 - prodotti: titolo, ingredienti, prezzo, prezzo_scontato, visibile, prodotto_fresco, prodotto_congelato, senza_glutine, senza_lattosio, note, disponibile_senzaGlutine, disponibile_senzaLattosio, prezzo_senzaGlutine, prezzo_senzaLattosio, categoria_id
@@ -88,7 +96,7 @@ Regole:
 - Per menu e categorie usa "titolo" e MAI "nome".
 - "visibile" accetta SOLO 1 o 0."""
 
-        # 1. Tenta Ollama
+        # 1. Tenta Ollama se libero
         used_ollama = False
         with ollama_lock:
             if not ollama_busy:
@@ -105,7 +113,7 @@ Regole:
                 with ollama_lock:
                     ollama_busy = False
 
-        # 2. Fallback su HF
+        # 2. Fallback su HuggingFace (in sequenza)
         res = query_huggingface(user_message, system_prompt)
         if res:
             return jsonify({"success": True, "raw_text": clean_json_response(res)})
